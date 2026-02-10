@@ -1,0 +1,24 @@
+# TODO
+
+- [x] Schemas: implement Pydantic models in `src/schemas/canonical.py` (sections, spans, tables, provenance) and `src/schemas/policy.py` (components, entities, metadata, provenance, index summary).
+- [x] Config: load `configs/config.example.yaml` in CLI; include model/provider (ChatGPT or Claude via Bedrock), temp=0.1, max_tokens, OCR confidence threshold, merge similarity, validation thresholds, retry/backoff.
+- [x] Regularization: format detection in `src/regularize/router.py`; implement `pdf_native.py` (PyMuPDF) with heading detection and extractability check, `docx.py` with headings/tables, `html_md.py` with headings/tables; implement `pdf_ocr.py` with Google Document AI (config-driven project/location/processor); ensure canonical JSON fields match `overview/implementation.md`.
+- [x] Update output schema: align extraction output to enrichment pattern (`schema_version`, `processing_status`, structured scope/conditions/actions with source_text) per `overview/Output Format Definition JSON Enrichment Pattern.md`; propagate through pipeline and examples.
+- [x] Local LLM mode: add Ollama/Mistral provider branch in `src/llm/client.py` for cheap prompt tuning on Pass 1/2.
+- [x] Merge evidence aggregation: enhance Pass 4 to aggregate duplicate/overlapping clauses (same pair evidence) before LLM merge, alongside embeddings.
+- [ ] Proximity prior: incorporate same-section/table/paragraph co-occurrence as a cheap prior for linking/implicit policies before LLM calls (spans still depend on normalization quality).
+- [x] LLM client: implement ChatGPT/Claude JSON calls with schema enforcement + retry/backoff in `src/llm/client.py`; support provider switch via config.
+- Passes: 
+  - [x] Pass 1 classify (`pass1_classify.py`): policy vs non-policy with confidence/reason.
+  - [x] Pass 2 components (`pass2_components.py`): scope/conditions/actions/exceptions with structured types and source_text; error handling for insufficient content.
+  - [x] Pass 3 entities (`pass3_entities.py`): regex+spaCy baseline, LLM fallback; include spans/types.
+  - [x] Pass 4 merge (`pass4_merge.py`): embeddings clustering (sim>0.9) + evidence aggregation; track source sections.
+  - [x] Pass 5 metadata (`pass5_metadata.py`): source, owner, effective_date, domain, regulatory_linkage, confidence.
+  - [x] Pass 6 validation (`pass6_validate.py`): rule checks (empty fields, bad dates) + LLM critique; flag low-confidence.
+- [x] Connect passes end-to-end: orchestrate Pass1→Pass6 with config-driven LLM client and regularization, producing enriched JSONL.
+- [x] Orchestration: connect regularization → passes → merge → metadata → validation in `src/pipeline.py`; ensure outputs `policies.jsonl` and `index.json` to `out/` with span provenance and passes_used/low_confidence flags.
+- [x] Storage: implement JSONL and index writers in `src/storage/writer.py`; create `out/` if missing.
+- [x] Logging/metrics: add basic logging for timing, flagged_pct; surface per-pass counts for cost/runtime estimates (timing added).
+- [x] Testing: add unit tests for passes (classification, components, entities span propagation, merge evidence). Integration tests pending when sample docs are ready.
+- [x] Sample data: populate `sample_docs/` with a small doc and expected golden outputs to exercise the pipeline.
+- [x] Parallelization (optional): Ray wrapper to parallelize per-section processing; off by default (config.parallel.enabled).

@@ -1,0 +1,588 @@
+\documentclass[11pt]{article}
+\usepackage[review]{acl}
+\usepackage{times}
+\usepackage{latexsym}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{microtype}
+\usepackage{inconsolata}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage{pifont}
+
+% Placeholder 표시용 커맨드
+\newcommand{\placeholder}[1]{\textcolor{red}{[PLACEHOLDER: #1]}}
+\newcommand{\todo}[1]{\textcolor{blue}{[TODO: #1]}}
+
+\title{Beyond Guardrails: Automating Enterprise Policy Compliance\\in Production LLM Systems}
+
+\author{Anonymous}
+
+\begin{document}
+\maketitle
+
+% ============================================================
+% ABSTRACT
+% ============================================================
+\begin{abstract}
+Enterprise deployment of Large Language Models requires strict compliance with organizational policies, industry regulations, and ethical guidelines. The regulatory landscape is intensifying: the EU AI Act imposes fines up to \texteuro{}35 million or 7\% of global revenue, while compliance failures cost enterprises an average of \$14.82 million per incident, 2.71$\times$ higher than compliance investments \citep{ponemon2024}. Current approaches rely on runtime guardrails requiring manual rule specification; we estimate that converting 127 policies to NeMo's Colang format requires approximately 40 person-hours based on per-rule authoring benchmarks \citep{rebedea2023nemo}.
+
+We present \textsc{PolicyLLM}, to our knowledge the first end-to-end framework automating enterprise policy compliance. Our system introduces: (1) automated extraction of policies into structured components with governance metadata, achieving \placeholder{87.3\%} F1; (2) hybrid conflict detection combining SMT solving with semantic analysis, achieving \placeholder{82.4\%} F1, validated by research showing LLM+SMT achieves 100\% accuracy versus 33.3\% for LLM-only on compliance tasks \citep{hsia2025}; and (3) multi-layer enforcement distributing policies across prompts, RAG, and guardrails. We introduce \textsc{PolicyCompliance-Enterprise}, a benchmark combining real company policies with the DecisionsDev policy corpus \citep{decisionsDev2024}. PolicyLLM achieves \placeholder{94.2\%} compliance rate, \placeholder{8.8} points above baselines, with \placeholder{201ms} latency overhead.
+\end{abstract}
+
+% ============================================================
+% 1. INTRODUCTION
+% ============================================================
+\section{Introduction}
+\label{sec:intro}
+
+Enterprise deployment of Large Language Models (LLMs) in customer-facing applications has created substantial compliance challenges with quantifiable financial consequences. In February 2024, a Canadian tribunal ruled against Air Canada after its chatbot fabricated a non-existent bereavement fare policy, establishing the legal principle that ``it makes no difference whether the information comes from a static page or a chatbot'' \citep{aircanada2024}. The ruling confirmed that organizations bear full responsibility for AI-generated misinformation.
+
+This case exemplifies broader enforcement trends. Global regulators imposed \$4.5 billion in banking compliance fines during 2024 alone \citep{fourthline2024}. Meta received \texteuro{}310 million for AI-driven behavioral profiling without consent. OpenAI was fined \texteuro{}15 million for ChatGPT GDPR violations \citep{italy_dpa2024}. Wells Fargo paid \$3.7 billion, the largest consumer protection penalty on record \citep{cfpb2022}. The EU AI Act (effective August 2025) establishes fines up to \texteuro{}35 million or 7\% of global turnover, exceeding GDPR's 4\% maximum \citep{euaiact2024}. The OWASP Top 10 for LLM Applications identifies prompt injection, sensitive information disclosure, and misinformation as critical vulnerabilities requiring policy-level mitigation \citep{owasp2025}. Ponemon Institute research shows non-compliance costs \$14.82 million on average, 2.71$\times$ higher than typical compliance investments of \$5.47 million \citep{ponemon2024}.
+
+Current enterprise approaches fall into three categories, each with significant limitations. \textbf{Deterministic systems} such as Bank of America's Erica maintain over 700 pre-approved responses, achieving 98\% resolution rate across 3 billion interactions, but cannot scale to dynamic policy environments \citep{bofa2025}. \textbf{Orchestration layers} such as Wells Fargo's Fargo employ privacy-first architectures where no PII reaches the LLM, but require substantial engineering investment most organizations cannot replicate \citep{wellsfargo2025}. \textbf{Guardrails systems} such as NeMo \citep{rebedea2023nemo} and Llama Guard \citep{inan2023llamaguard} require manual rule specification. A TELUS Digital study found all 24 tested banking chatbots were exploitable, with success rates ranging from 1\% to 64\% \citep{telus2025}. CAIN 2025 benchmarks show NeMo achieving only 81\% detection versus 98.7\% for trained classifiers \citep{cain2025}.
+
+All three approaches share a common limitation: they require manual policy definition. None automatically extract policies from documents, detect conflicts between policies, or coordinate enforcement across multiple layers.
+
+We present \textsc{PolicyLLM}, to our knowledge the first end-to-end framework for automating enterprise policy compliance. Our contributions are as follows:
+
+\begin{enumerate}
+\item \textbf{Automated Policy Extraction} (\S\ref{sec:extraction}): A multi-pass pipeline that extracts policies into structured components (\texttt{scope}, \texttt{conditions}, \texttt{actions}, \texttt{exceptions}) with governance metadata (\texttt{source}, \texttt{owner}, \texttt{effective\_date}, \texttt{domain}, \texttt{regulatory\_linkage}).
+
+\item \textbf{Hybrid Conflict Detection} (\S\ref{sec:conflict}): A conflict detection module combining SMT-based logical verification \citep{z3solver} with semantic analysis, motivated by research showing LLM+Z3 achieves F1=94.8\% versus 69.1\% for LLM-only \citep{nsvif2024}.
+
+\item \textbf{Multi-Layer Enforcement} (\S\ref{sec:enforcement}): A defense-in-depth architecture that distributes policies across fine-tuning, system prompts, RAG, and guardrails based on policy characteristics.
+
+\item \textbf{PolicyCompliance-Enterprise Benchmark} (\S\ref{sec:experiments}): A benchmark combining real company policy sets with the DecisionsDev policy corpus \citep{decisionsDev2024} for evaluating both explicit and implicit policy processing.
+\end{enumerate}
+
+
+% ============================================================
+% 2. RELATED WORK
+% ============================================================
+\section{Related Work}
+\label{sec:related}
+
+\subsection{Runtime Guardrail Systems}
+
+Enterprise deployments reveal a three-tier defense architecture emerging as best practice \citep{f5guardrails2025}: (1) rule-based validators (<10ms) using regex and keyword matching, (2) ML classifiers (50--200ms) such as Meta's PromptGuard, and (3) LLM-based reasoning (200--500ms+) for complex semantic policies.
+
+\textbf{NeMo Guardrails} \citep{rebedea2023nemo} provides programmable safety using the Colang DSL and achieves 1.4$\times$ improved threat detection with +0.5s latency for five parallel guardrails \citep{nvidia2025}. However, CAIN 2025 benchmarks show 81\% off-topic detection versus 98.7\% for trained classifiers \citep{cain2025}. \textbf{Llama Guard} \citep{inan2023llamaguard} achieves F1=0.939 with 0.040 false positive rate across 14 MLCommons categories. \textbf{AWS Bedrock Guardrails} provides 99\% accuracy via automated reasoning but requires pre-defined JSON configurations \citep{aws2024}. \textbf{Lakera Guard} achieves <50ms latency while learning from approximately 100,000 daily attacks \citep{lakera2025}. \textbf{WildGuard} \citep{han2024wildguard} achieves 82.8\% accuracy across 13 risk categories on WildGuardTest.
+
+Table~\ref{tab:comparison} summarizes the key gap: all existing systems assume pre-defined policies and provide no upstream policy processing.
+
+\begin{table}[h]
+\small
+\centering
+\begin{tabular}{lcccc}
+\toprule
+\textbf{System} & \textbf{Auto} & \textbf{Conflict} & \textbf{Multi} & \textbf{Meta-} \\
+ & \textbf{Extract} & \textbf{Detect} & \textbf{Layer} & \textbf{data} \\
+\midrule
+NeMo & \ding{55} & \ding{55} & \ding{51} & \ding{55} \\
+Llama Guard & \ding{55} & \ding{55} & \ding{55} & \ding{55} \\
+AWS Bedrock & \ding{55} & \ding{55} & \ding{51} & Partial \\
+Lakera Guard & \ding{55} & \ding{55} & \ding{51} & \ding{55} \\
+WildGuard & \ding{55} & \ding{55} & \ding{55} & \ding{55} \\
+\midrule
+\textbf{PolicyLLM} & \ding{51} & \ding{51} & \ding{51} & \ding{51} \\
+\bottomrule
+\end{tabular}
+\caption{Comparison with existing systems. Only PolicyLLM provides automatic extraction, conflict detection, and governance metadata.}
+\label{tab:comparison}
+\end{table}
+
+\subsection{Policy Extraction and Formal Methods}
+
+Legal-BERT \citep{chalkidis2020legalbert} achieves 96.8\% precision on statutory definitions. The CUAD benchmark \citep{hendrycks2021cuad} provides expert-annotated contract review with 41 clause types, establishing standards for legal document understanding. PolicyQA \citep{ahmad2020policyqa} addresses reading comprehension over privacy policies. However, enterprise operational policies (refund procedures, escalation workflows) remain underexplored compared to legal and regulatory texts.
+
+For conflict detection, recent work validates hybrid neuro-symbolic approaches. \citet{nsvif2024} show that LLM+Z3 achieves F1=94.8\% versus 69.1\% for LLM-only on instruction verification (+25.7 points). \citet{hsia2025} demonstrate 100\% accuracy with 300$\times$ speedup on financial compliance using LLM+SMT. The LLM-Modulo framework \citep{kambhampati2024} formalizes the principle that LLMs cannot reliably self-verify, as self-critique often degrades performance through hallucinated false positives. This motivates our design: delegate hard logical constraints to SMT solvers \citep{z3solver} while using LLM critics for semantic evaluation.
+
+\subsection{Multi-Layer Safety and RAG for Compliance}
+
+Recent research establishes that no single defense layer suffices. \citet{qi2024finetuning} show that fine-tuning with as few as 10 adversarial examples can compromise model safety. Safety alignment concentrates in early token positions and collapses mid-generation \citep{shallow2025}. Indirect prompt injection \citep{greshake2023prompt} and universal adversarial attacks \citep{zou2023universal} demonstrate that runtime inputs can bypass both fine-tuning and system-level safeguards, motivating post-generation verification. An integrated RAG defense framework achieves 89.4\% attack mitigation (ASR reduced from 73.2\% to 8.7\%) while preserving 94.3\% legitimate functionality \citep{ragdefense2025}. Red teaming with language models \citep{perez2022red} further reveals that automated adversaries can discover failure modes missed by manual testing. These findings motivate our three-stage enforcement architecture.
+
+Retrieval-augmented generation \citep{lewis2020rag,gao2024rag} enables grounding LLM responses in authoritative policy documents. The Instruction Hierarchy \citep{wallace2024instruction} introduced priority-based instruction following, though IHEval \citep{iheval2025} reveals that models exhibit inconsistent behaviors when conflicts arise. Constitutional AI \citep{bai2022} demonstrates principle internalization through self-critique but relies on manually curated universal constitutions rather than enterprise-specific policies. PolicyLLM extends these ideas with formally verified, metadata-driven priority resolution.
+
+Traditional business process compliance \citep{hashmi2018compliance} relies on formal process modeling (e.g., BPMN annotations) and manual rule specification \citep{lam2016enabling}. These approaches achieve formal guarantees but do not scale to the volume and variability of LLM-generated outputs. PolicyLLM bridges this gap by combining formal verification (SMT) with the scalability of LLM-based extraction and classification.
+
+
+% ============================================================
+% 3. SYSTEM DESIGN
+% ============================================================
+\section{System Design}
+\label{sec:method}
+
+\subsection{Overview}
+
+PolicyLLM comprises five modules organized in two phases (Figure~\ref{fig:architecture}).
+
+\textbf{Phase 1 (Offline)}: (1) Policy Extraction from documents and decision logs; (2) Policy Formalization into verifiable representations (logic rules, constraint specifications) and procedural representations (decision graphs); (3) Conflict Detection and Resolution using hybrid SMT+semantic analysis on verifiable representations; (4) Layer Assignment distributing policies to optimal enforcement mechanisms.
+
+\textbf{Phase 2 (Online)}: (5) Runtime Enforcement with pre-generation, during-generation, and post-generation stages.
+
+\begin{figure}[h]
+\centering
+\fbox{\parbox{0.93\columnwidth}{
+\footnotesize
+\textbf{Phase 1: Offline}\\[2pt]
+Documents $\xrightarrow{\text{\S\ref{sec:extraction}}}$ \fbox{Extraction} $\rightarrow$ Policies + Metadata\\
+Policies $\xrightarrow{\text{\S\ref{sec:formalization}}}$ \fbox{Formalization} $\rightarrow$ Rules/Constraints + Graphs\\
+Rules/Constr. $\xrightarrow{\text{\S\ref{sec:conflict}}}$ \fbox{Conflict Det.} $\rightarrow$ Conflict-Free Set\\
+Policies $\xrightarrow{\text{\S\ref{sec:layer}}}$ \fbox{Layer Assign.} $\rightarrow$ Placement Plan\\[4pt]
+\textbf{Phase 2: Online}\\[2pt]
+Query $\xrightarrow{\text{\S\ref{sec:enforcement}}}$ \fbox{Pre} $\rightarrow$ \fbox{During} $\rightarrow$ \fbox{Post} $\rightarrow$ Response
+}}
+\caption{PolicyLLM architecture overview.}
+\label{fig:architecture}
+\end{figure}
+
+% ---- 3.2 EXTRACTION ----
+\subsection{Policy Extraction}
+\label{sec:extraction}
+
+\subsubsection{Explicit Policy Extraction}
+
+We extract policies into four semantic components via a multi-pass LLM pipeline.
+
+\textbf{Pass 1 (Segmentation)}: Detect document sections using heading patterns and structural cues.
+
+\textbf{Pass 2 (Classification)}: Classify each section as policy-relevant (policy, procedure, guideline) or non-policy (background, definitions).
+
+\textbf{Pass 3 (Component Extraction)}: Extract four components with JSON schema enforcement: \texttt{scope} (who and what the policy applies to), \texttt{conditions} (triggers, prerequisites, and time constraints), \texttt{actions} (required and prohibited behaviors), and \texttt{exceptions} (edge cases and overrides). This schema draws on the CUAD annotation framework \citep{hendrycks2021cuad} adapted for operational policies.
+
+\textbf{Pass 4 (Entity Extraction)}: Identify monetary amounts, time periods, role names, and product categories.
+
+\textbf{Pass 5 (Validation)}: Cross-check for internal consistency and flag low-confidence extractions for human review.
+
+\subsubsection{Metadata Tagging for Governance}
+
+Each extracted policy is tagged with five governance metadata fields: \texttt{source} (origin document path and version), \texttt{owner} (responsible team or individual), \texttt{effective\_date} (when the policy becomes active), \texttt{domain} (functional category such as refund, security, or HR), and \texttt{regulatory\_linkage} (connected regulations such as GDPR, HIPAA, or SEC rules).
+
+This metadata enables four capabilities: (1) audit trails linking enforcement decisions to source documents, (2) automatic escalation to policy owners when conflicts arise, (3) temporal conflict detection for overlapping effective dates, and (4) priority-based resolution using regulatory linkage.
+
+Table~\ref{tab:extraction_example} illustrates the extraction output for a representative policy clause.
+
+\begin{table}[h]
+\small
+\centering
+\begin{tabular}{p{1.4cm}p{5.4cm}}
+\toprule
+\multicolumn{2}{l}{\textbf{Input:} ``Customers may return items within 30 days} \\
+\multicolumn{2}{l}{of purchase for a full refund. Electronics must be} \\
+\multicolumn{2}{l}{returned within 15 days. Items without receipt} \\
+\multicolumn{2}{l}{receive store credit only.''} \\
+\midrule
+\multicolumn{2}{l}{\textit{Components}} \\
+\texttt{scope} & All customers; all product categories \\
+\texttt{conditions} & Within 30 days of purchase (general), within 15 days (electronics), receipt required for cash refund \\
+\texttt{actions} & Full refund (with receipt, within window); store credit (no receipt) \\
+\texttt{exceptions} & Electronics: 15-day override on 30-day window \\
+\midrule
+\multicolumn{2}{l}{\textit{Metadata}} \\
+\texttt{source} & return\_policy\_v3.2, \S4.1 \\
+\texttt{owner} & Customer Service Dept. \\
+\texttt{eff\_date} & 2024-01-15 \\
+\texttt{domain} & refund \\
+\texttt{reg\_link} & FTC Cooling-Off Rule \\
+\bottomrule
+\end{tabular}
+\caption{Extraction example. A single policy clause yields structured components and governance metadata.}
+\label{tab:extraction_example}
+\end{table}
+
+\paragraph{Example JSON Outputs.} The extractor writes one JSON object per line to \texttt{policies.jsonl} and a batch summary to \texttt{index.json}. This aligns with the pipeline in \S\ref{sec:extraction} and the implementation scaffolding (schemas, config, regularization).
+
+\begin{verbatim}
+# policies.jsonl
+{"policy_id":"policy-001","doc_id":"constitution_v2","components":{"scope":"customer-facing chatbots","conditions":["user requests account deletion"],"actions":["initiate deletion workflow","confirm completion within 30 days"],"exceptions":["legal hold in effect"],"extraction_notes":"legal hold timing ambiguous"},"entities":[{"type":"date","value":"30 days","span":{"start":128,"end":135,"page":2,"section_id":"sec2.3"}},{"type":"role","value":"legal","span":{"start":212,"end":217,"page":2,"section_id":"sec2.3"}}],"metadata":{"source":"constitution_v2#sec2.3","owner":"Privacy Team","effective_date":"2024-01-15","domain":"privacy","regulatory_linkage":"GDPR","confidence":0.84},"provenance":{"passes_used":[1,2,3,4,5,6],"low_confidence":["owner_inference"],"confidence_score":0.84,"source_spans":[{"start":0,"end":260,"page":2,"section_id":"sec2.3"}]}}
+{"policy_id":"policy-002","doc_id":"constitution_v2","components":{"scope":"returns for electronics","conditions":["within 15 days of purchase","receipt provided"],"actions":["issue full refund"],"exceptions":["no receipt → store credit"],"extraction_notes":null},"entities":[{"type":"date","value":"15 days","span":{"start":45,"end":52,"page":3,"section_id":"sec4.1"}}],"metadata":{"source":"constitution_v2#sec4.1","owner":"Customer Service","effective_date":"2024-03-01","domain":"refund","regulatory_linkage":"FTC","confidence":0.90},"provenance":{"passes_used":[1,2,3,4,5,6],"low_confidence":[],"confidence_score":0.90,"source_spans":[{"start":0,"end":180,"page":3,"section_id":"sec4.1"}]}}
+\end{verbatim}
+
+\begin{verbatim}
+# index.json
+{
+  "doc_id": "constitution_v2",
+  "batch_id": "20260209-2353",
+  "num_policies": 2,
+  "flagged_pct": 0.0,
+  "domains": {
+    "privacy": 1,
+    "refund": 1
+  }
+}
+\end{verbatim}
+
+\subsubsection{Implicit Policy Discovery}
+
+Organizations often operate by unwritten rules that exist in decision patterns but not in documentation. We discover these using the FP-Growth algorithm \citep{han2000fpgrowth} on decision logs:
+\begin{equation}
+\text{conf}(C \rightarrow A) = \frac{|H_{C \land A}|}{|H_C|}
+\end{equation}
+
+A pattern becomes a candidate implicit policy if $\text{conf} \geq 0.8$ and $\text{support} \geq 50$ instances. All candidates require mandatory human validation before integration into the policy knowledge base.
+
+% ---- 3.3 FORMALIZATION ----
+\subsection{Policy Formalization}
+\label{sec:formalization}
+
+Extracted policies are converted into formal representations that serve two distinct purposes: verification (input to SMT-based conflict detection) and runtime guidance (input to LLM during generation).
+
+\subsubsection{Verifiable Representations}
+
+Two representations serve as input to the Z3 solver (\S\ref{sec:conflict}).
+
+\textbf{Logic Rules.} Conditional policies are expressed as conjunctive antecedents with a single consequent:
+\begin{equation}
+r: \bigwedge_{i} c_i \rightarrow a
+\end{equation}
+Example: $(tier{=}VIP) \land (amount{>}100) \rightarrow \text{free\_shipping}$. Z3 checks whether two rules can fire simultaneously with contradictory actions.
+
+\textbf{Constraint Specifications.} Invariant requirements are expressed using temporal operators: $\square(\phi)$ requires that $\phi$ always holds (e.g., ``always verify identity before account access''), while $\neg\diamond(\psi)$ requires that $\psi$ never occurs (e.g., ``never disclose PII to third parties''). Z3 verifies that no combination of active policies violates these global constraints.
+
+\subsubsection{Procedural Representations}
+
+\textbf{Decision Graphs.} Complex multi-step policies are represented as directed acyclic graphs where nodes are decision conditions and edges are outcomes. Figure~\ref{fig:decision_graph} shows a refund escalation workflow: it branches on receipt availability, purchase date, and amount threshold, with each leaf node specifying an action.
+
+\begin{figure}[h]
+\small
+\centering
+\fbox{\parbox{0.93\columnwidth}{
+\begin{center}
+\texttt{[Receipt?]}\\
+$\swarrow$ \hspace{1.5cm} $\searrow$\\
+\texttt{Yes} \hspace{1.8cm} \texttt{No}\\
+$\downarrow$ \hspace{2.2cm} $\downarrow$\\
+\texttt{[$\leq$30 days?]} \hspace{0.6cm} \texttt{[$\leq$\$50?]}\\
+$\swarrow$ \quad $\searrow$ \hspace{0.6cm} $\swarrow$ \quad $\searrow$\\
+\texttt{Y} \hspace{0.5cm} \texttt{N} \hspace{0.5cm} \texttt{Y} \hspace{0.5cm} \texttt{N}\\
+$\downarrow$ \hspace{0.7cm} $\downarrow$ \hspace{0.5cm} $\downarrow$ \hspace{0.7cm} $\downarrow$\\
+\fbox{\scriptsize Full refund} ~ \fbox{\scriptsize Mgr appr.} ~ \fbox{\scriptsize Store credit} ~ \fbox{\scriptsize Reject}
+\end{center}
+\vspace{2pt}
+\textbf{Fixed:} Graph structure (all 4 paths)\\
+\textbf{Dynamic:} Query $\rightarrow$ path. E.g., no receipt + \$80 $\rightarrow$ Reject
+}}
+\caption{Decision graph example (refund policy). Structure is fixed offline; only the traversal path varies per query.}
+\label{fig:decision_graph}
+\end{figure}
+
+The graph structure (branching conditions and terminal actions) is fixed at offline time, determined by organizational policy. At runtime, only the traversal path varies per query: given a customer's specific conditions, the system follows the corresponding edges to reach the correct terminal action. This separation enables offline construction and validation while supporting dynamic per-query routing during generation.
+
+Decision graphs serve a different purpose from logic rules and constraint specifications. Converting a multi-step procedure into flat logic rules causes rule explosion (a 5-level workflow with binary branches yields 32 rules) and loses the sequential structure that guides the LLM through intermediate steps. Instead, decision graphs are injected into the generation context at runtime (\S\ref{sec:enforcement}) as structured chain-of-thought scaffolds \citep{wei2022cot}, reducing the likelihood of skipping steps or following incorrect paths.
+
+Queries that fall outside any defined graph path (i.e., a condition combination not anticipated by policy) receive low compliance scores at the Post-Generation stage, triggering escalation to the policy \texttt{owner}. This is by design: the system detects uncovered cases rather than extrapolating beyond defined policy.
+
+% ---- 3.4 CONFLICT DETECTION ----
+\subsection{Conflict Detection and Resolution}
+\label{sec:conflict}
+
+\subsubsection{Design Rationale}
+
+The LLM-Modulo framework \citep{kambhampati2024} establishes that LLMs cannot reliably self-verify: self-critique often degrades performance through hallucinated false positives and missed violations. Following this principle, we delegate hard logical constraints to SMT solvers while using LLM critics for semantic evaluation.
+
+\subsubsection{SMT-Based Logical Verification}
+
+Logic rules and constraint specifications from \S\ref{sec:formalization} are translated to first-order logic and checked for conflicts using the Z3 solver \citep{z3solver}:
+\begin{equation}
+\text{SAT}\big(\text{cond}(p_i) \land \text{cond}(p_j) \land (\text{act}(p_i) \neq \text{act}(p_j))\big)
+\end{equation}
+
+If satisfiable, a conflict exists and the satisfying assignment provides a concrete conflict scenario for human review. We use \texttt{get\_unsat\_core()} to identify minimal conflicting constraint subsets, enabling targeted resolution. This technique achieves 78.6--91.7\% repair success rate in multi-constraint planning \citep{hao2025}.
+
+\subsubsection{Semantic Conflict Analysis}
+
+SMT catches logical contradictions but misses semantic conflicts (e.g., ``be helpful'' versus ``minimize liability''). We compute pairwise policy embeddings using Sentence-BERT \citep{reimers2019sbert} and apply LLM-based conflict classification for policy pairs exceeding a cosine similarity threshold.
+
+Figure~\ref{fig:conflict_examples} illustrates the complementary coverage of the two methods.
+
+\begin{figure}[h]
+\small
+\fbox{\parbox{0.93\columnwidth}{
+\textbf{Type A: Logical conflict (caught by SMT)}\\[2pt]
+$p_1$: ``Orders over \$50 qualify for free shipping.''\\
+$p_2$: ``All orders incur a \$5.99 shipping fee.''\\
+$\rightarrow$ Z3 finds: $\text{amount}{=}60$ satisfies both conditions\\
+\phantom{$\rightarrow$} but $\text{free\_ship} \neq \text{charge\_5.99}$ \ding{51}\\[6pt]
+\textbf{Type B: Semantic conflict (caught by LLM)}\\[2pt]
+$p_3$: ``Agents should proactively suggest alternatives\\
+\phantom{$p_3$:} to resolve customer issues.''\\
+$p_4$: ``Agents must not recommend competitor\\
+\phantom{$p_4$:} products under any circumstances.''\\
+$\rightarrow$ No logical contradiction (different actions)\\
+$\rightarrow$ LLM detects: suggesting alternatives may\\
+\phantom{$\rightarrow$} include competitor products \ding{51}\\[6pt]
+\textbf{Type C: No conflict (correctly ignored)}\\[2pt]
+$p_5$: ``VIP customers receive priority support.''\\
+$p_6$: ``All returns require a receipt.''\\
+$\rightarrow$ Z3: non-overlapping scopes. LLM: unrelated. \ding{55}
+}}
+\caption{Conflict detection examples. SMT catches logical contradictions (Type A); semantic analysis catches intent-level conflicts invisible to formal methods (Type B). Neither alone achieves full coverage.}
+\label{fig:conflict_examples}
+\end{figure}
+
+\subsubsection{Metadata-Driven Priority Resolution}
+
+Detected conflicts are resolved using a five-level priority hierarchy derived from metadata:
+\begin{enumerate}
+\item \textbf{Legal/Regulatory}: Policies with \texttt{regulatory\_linkage} (GDPR, HIPAA, SEC)
+\item \textbf{Core Company Values}: Safety, privacy, and ethics principles
+\item \textbf{Company-wide Policies}: Cross-departmental rules (refund, escalation)
+\item \textbf{Department-specific Rules}: Team-level guidelines
+\item \textbf{Situational Guidelines}: Temporary, promotional, or context-specific policies
+\end{enumerate}
+
+Same-priority conflicts are escalated to the \texttt{owner} specified in metadata, accompanied by concrete conflict scenarios generated by the SMT solver.
+
+% ---- 3.5 LAYER ASSIGNMENT ----
+\subsection{Layer Assignment}
+\label{sec:layer}
+
+Not all policies should be enforced identically. We assign each policy to one or more enforcement layers based on four dimensions scored $[0,1]$: stability ($s_1$), criticality ($s_2$), context-dependence ($s_3$), and enforcement strictness ($s_4$). Table~\ref{tab:layers} shows the assignment criteria.
+
+\begin{table}[h]
+\small
+\centering
+\begin{tabular}{lccccl}
+\toprule
+\textbf{Layer} & $s_1$ & $s_2$ & $s_3$ & $s_4$ & \textbf{Update} \\
+\midrule
+Fine-tuning & $\geq$\!.8 & $\geq$\!.7 & $\leq$\!.3 & any & Quarterly \\
+Sys. Prompt & $\geq$\!.6 & any & $\leq$\!.5 & any & Per deploy \\
+Runtime RAG & any & any & $\geq$\!.6 & $\leq$\!.7 & Real-time \\
+Guardrails & any & $\geq$\!.8 & any & $\geq$\!.8 & Real-time \\
+\bottomrule
+\end{tabular}
+\caption{Layer assignment criteria. Critical policies ($s_2 \geq 0.8$) are assigned to multiple layers for defense-in-depth.}
+\label{tab:layers}
+\end{table}
+
+Critical policies ($s_2 \geq 0.8$) are assigned to multiple layers simultaneously, providing defense-in-depth. We evaluate the impact of this multi-layer strategy in \S\ref{sec:experiments}.
+
+% ---- 3.6 RUNTIME ENFORCEMENT ----
+\subsection{Runtime Enforcement}
+\label{sec:enforcement}
+
+We implement three-stage enforcement.
+
+\textbf{Pre-Generation.} (1) Query classification using \texttt{domain} metadata; (2) dense passage retrieval \citep{karpukhin2020dpr} for permission-aware policy selection; (3) context injection with explicit boundary markers.
+
+\textbf{During-Generation.} (1) Logic rules and constraint specifications are injected as explicit compliance requirements; (2) decision graphs (\S\ref{sec:formalization}) are serialized as step-by-step procedures and injected to structure the model's chain-of-thought reasoning \citep{wei2022cot}, guiding it through each decision node in sequence rather than allowing it to skip intermediate steps; (3) priority guidance using \texttt{regulatory\_linkage} metadata ensures that higher-priority policies override lower-priority ones when they conflict.
+
+\textbf{Post-Generation.} (1) Rule-based pattern matching for explicit violations; (2) SMT verification for logical consistency against retrieved policies; (3) LLM evaluation for semantic compliance and tone. Responses involving queries outside defined decision graph paths receive low compliance scores, as the system cannot verify adherence to a procedure that does not exist for the given condition combination.
+
+Action selection is based on compliance score $S$: pass ($S \geq 0.95$), auto-correct ($0.85 \leq S < 0.95$), regenerate ($0.70 \leq S < 0.85$), and escalate to \texttt{owner} ($S < 0.70$). Escalation cases include both detected violations and uncovered scenarios where existing policy provides insufficient guidance.
+
+
+% ============================================================
+% 4. EXPERIMENTS
+% ============================================================
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Dataset: PolicyCompliance-Enterprise}
+
+We introduce \textsc{PolicyCompliance-Enterprise}, a benchmark combining real company policies with decision corpora for evaluating both explicit and implicit policy processing.
+
+\textbf{Part 1: Explicit Policies (real companies).} Each company in our benchmark (Table~\ref{tab:dataset_explicit}) represents an independent deployment scenario: an organization building its own customer-facing LLM system that must comply with all of its own policies simultaneously. We collect all publicly available policy documents for each company and evaluate extraction, conflict detection, and compliance independently per company. Conflicts are detected \textit{within} each company's policy set (e.g., JetBlue's refund policy versus its TrueBlue terms), not across companies. Results are reported as macro-averages over the six independent evaluations.
+
+\begin{table}[h]
+\small
+\centering
+\begin{tabular}{llrl}
+\toprule
+\textbf{Domain} & \textbf{Company} & \textbf{Docs} & \textbf{Policy Types} \\
+\midrule
+Airlines & JetBlue & \placeholder{47} & CoC, TrueBlue, Privacy \\
+Airlines & Delta & \placeholder{52} & CoC, SkyMiles, Commitment \\
+\midrule
+Finance & Chase & \placeholder{58} & Account, Privacy, Disputes \\
+Finance & Wells Fargo & \placeholder{61} & Account, Disclosures \\
+\midrule
+E-comm. & Amazon & \placeholder{63} & Return, A-to-Z, Seller \\
+E-comm. & Target & \placeholder{51} & Return, RedCard, Circle \\
+\midrule
+\multicolumn{2}{l}{\textbf{Total: 6 companies}} & \placeholder{332} & \\
+\bottomrule
+\end{tabular}
+\caption{Part 1: Explicit policies. Each company is evaluated independently, simulating a single-organization deployment. Document counts are preliminary estimates.}
+\label{tab:dataset_explicit}
+\end{table}
+
+\textbf{Part 2: Implicit Policies (DecisionsDev corpus).} We use the DecisionsDev policy corpus \citep{decisionsDev2024} (Table~\ref{tab:dataset_implicit}), an open-source benchmark (Apache-2.0) where each domain provides four separate artifacts: (1) a plain-text policy specification, (2) a Python reference implementation validated by human experts, (3) a data generator, and (4) ground-truth decision datasets produced by the reference implementation. Crucially, the policy specification and decision datasets exist as independent files, enabling a clean evaluation protocol: we provide only the decision logs to our system, withhold the policy text, and measure whether the system can recover the underlying rules by comparing extracted implicit policies against the ground-truth specification.
+
+\begin{table}[h]
+\small
+\centering
+\begin{tabular}{lll}
+\toprule
+\textbf{Domain} & \textbf{Artifacts} & \textbf{Our Use} \\
+\midrule
+Luggage pricing & Policy + code + decisions & Implicit extraction \\
+Time off (HR) & Policy + code + decisions & Implicit extraction \\
+Insurance & Policy + code + decisions & Implicit extraction \\
+Loan approval & Policy + code + decisions & Implicit extraction \\
+Cardiovascular risk & Policy + code + decisions & Implicit extraction \\
+\bottomrule
+\end{tabular}
+\caption{Part 2: DecisionsDev corpus for implicit policy evaluation. Each domain provides independent policy specifications and decision logs, enabling extraction accuracy measurement.}
+\label{tab:dataset_implicit}
+\end{table}
+
+\textbf{Test Queries.} \placeholder{2,000 customer queries with gold-standard compliant responses: 70\% normal, 20\% policy-edge-cases, 10\% adversarial.}
+
+\textbf{Annotation.} \placeholder{Three annotators (two legal professionals, one policy analyst). Inter-annotator agreement: Cohen's $\kappa$=0.78 for extraction, $\kappa$=0.74 for conflicts.}
+
+\subsection{Baselines}
+
+We compare against six baselines representing current practice: (1) \textbf{Vanilla GPT-4o} \citep{openai2024gpt4o} with no policy guidance; (2) \textbf{System Prompt Only} with all policies concatenated in the system message; (3) \textbf{RAG Only} with top-$k$ policies retrieved per query; (4) \textbf{NeMo Guardrails} \citep{rebedea2023nemo} with Colang rules manually created (estimated 40 person-hours for the full policy set); (5) \textbf{Llama Guard 3} \citep{inan2023llamaguard}; and (6) \textbf{WildGuard-7B} \citep{han2024wildguard}. All systems use GPT-4o as the generation backbone.
+
+\subsection{Main Results}
+
+% PLACEHOLDER NOTE: 아래 모든 수치는 예상 목표치.
+% 추출 F1: 85-90%, 충돌 F1: 80-85%, 준수율: 90-95% 기대.
+
+We evaluate three tasks. Tasks 1 and 2 validate individual modules (extraction and conflict detection) by comparing alternative approaches for each module in isolation. Task 3 evaluates the full system against end-to-end baselines on compliance rate, false positive rate, and latency.
+
+\subsubsection{Policy Extraction (Task 1)}
+
+This task measures how accurately policies are extracted into structured components from raw documents. We compare extraction methods, not full systems: rule-based regex, single-pass LLM (GPT-4o zero-shot and with JSON schema), and our multi-pass pipeline. Evaluation uses component-level F1 against human annotations (Table~\ref{tab:extraction}).
+
+\begin{table}[t]
+\small
+\centering
+\begin{tabular}{lccc}
+\toprule
+\textbf{Method} & \textbf{P} & \textbf{R} & \textbf{F1} \\
+\midrule
+Rule-based (regex) & \placeholder{71.2} & \placeholder{54.8} & \placeholder{62.1} \\
+GPT-4o zero-shot & \placeholder{82.3} & \placeholder{77.5} & \placeholder{79.8} \\
+GPT-4o + JSON schema & \placeholder{85.7} & \placeholder{81.2} & \placeholder{83.4} \\
+\textbf{Ours (multi-pass)} & \placeholder{89.1} & \placeholder{85.6} & \placeholder{87.3} \\
+\bottomrule
+\end{tabular}
+\caption{Policy extraction (Task 1). \placeholder{Target estimates pending implementation.}}
+\label{tab:extraction}
+\end{table}
+
+\subsubsection{Conflict Detection (Task 2)}
+
+This task measures how accurately conflicts are detected among policies within a single company's policy set. We compare detection methods: keyword overlap, embedding-based semantic similarity, SMT-only (Z3), LLM zero-shot classification, and our hybrid approach. Evaluation uses pair-level F1 against human-annotated conflict labels (Table~\ref{tab:conflict}).
+
+\begin{table}[h]
+\small
+\centering
+\begin{tabular}{lccc}
+\toprule
+\textbf{Method} & \textbf{P} & \textbf{R} & \textbf{F1} \\
+\midrule
+Keyword overlap & \placeholder{45.2} & \placeholder{62.1} & \placeholder{52.3} \\
+Semantic similarity & \placeholder{68.4} & \placeholder{74.3} & \placeholder{71.2} \\
+SMT only (Z3) & \placeholder{82.1} & \placeholder{58.4} & \placeholder{68.7} \\
+LLM zero-shot & \placeholder{72.1} & \placeholder{69.8} & \placeholder{70.9} \\
+\textbf{Ours (hybrid)} & \placeholder{84.7} & \placeholder{80.2} & \placeholder{82.4} \\
+\bottomrule
+\end{tabular}
+\caption{Conflict detection (Task 2), evaluated on within-company policy pairs. \placeholder{Target estimates.}}
+\label{tab:conflict}
+\end{table}
+
+\subsubsection{End-to-End Compliance (Task 3)}
+
+This is the primary evaluation. Given a customer query and a company's full policy set, does the system's response comply with all applicable policies? We compare the full PolicyLLM pipeline against six baselines representing current industry practice. Evaluation uses compliance rate (human-judged), false positive rate (legitimate queries incorrectly blocked), and median latency.
+
+\begin{table}[h]
+\small
+\centering
+\begin{tabular}{lccc}
+\toprule
+\textbf{Method} & \textbf{Comp.\%} & \textbf{FP\%} & \textbf{Lat.} \\
+\midrule
+Vanilla GPT-4o & \placeholder{71.2} & \placeholder{2.1} & \placeholder{847ms} \\
+System Prompt & \placeholder{78.5} & \placeholder{3.8} & \placeholder{892ms} \\
+RAG Only & \placeholder{82.3} & \placeholder{4.2} & \placeholder{1.1s} \\
+NeMo Guardrails & \placeholder{85.4} & \placeholder{8.7} & \placeholder{1.4s} \\
+Llama Guard 3 & \placeholder{83.2} & \placeholder{6.4} & \placeholder{1.1s} \\
+WildGuard-7B & \placeholder{81.8} & \placeholder{5.9} & \placeholder{1.2s} \\
+\midrule
+\textbf{PolicyLLM} & \placeholder{94.2} & \placeholder{5.2} & \placeholder{1.0s} \\
+\bottomrule
+\end{tabular}
+\caption{End-to-end compliance (Task 3). \placeholder{Target estimates pending implementation.}}
+\label{tab:e2e}
+\end{table}
+
+
+
+
+% ============================================================
+% 5. DISCUSSION
+% ============================================================
+\section{Discussion}
+\label{sec:discussion}
+
+We discuss implications of our experimental results and considerations for production deployment.
+
+\textbf{Metadata enables governance, not just detection.} Extraction alone identifies policy components, but without governance metadata the system cannot act on conflicts or enforce priorities. Without \texttt{owner}, detected conflicts have no escalation path; without \texttt{effective\_date}, expired policies remain active in retrieval; without \texttt{regulatory\_linkage}, priority resolution defaults to arbitrary ordering. The baselines in Table~\ref{tab:e2e} illustrate this: RAG Only retrieves relevant policies but achieves only \placeholder{82.3\%} compliance because it lacks the metadata needed to resolve conflicts or prioritize among retrieved policies.
+
+\textbf{Layer assignment matters more than policy volume.} The System Prompt baseline in Table~\ref{tab:e2e} injects all policies into the context window yet achieves only \placeholder{78.5\%} compliance. PolicyLLM achieves \placeholder{94.2\%} using the same policies distributed across appropriate enforcement layers. The \placeholder{15.7}-point gap suggests that where policies are placed matters as much as whether they are present. System prompts waste context on low-relevance policies while missing critical ones at retrieval time; distributing policies based on stability and criticality scores addresses both failure modes.
+
+\textbf{Hybrid verification addresses complementary failure modes.} SMT-only detection achieves high precision (\placeholder{82.1\%}) but low recall (\placeholder{58.4\%}), missing conflicts that are semantically but not logically contradictory. Semantic-only detection exhibits the opposite pattern. The hybrid approach balances both, achieving \placeholder{82.4\%} F1. This is consistent with \citet{nsvif2024}, who report a 25.7-point F1 gain from combining LLM reasoning with Z3 verification.
+
+\textbf{Implicit policy extraction is feasible but limited.} Using the DecisionsDev corpus, where ground-truth policies and decision logs are both available, we can evaluate whether decision patterns recover the underlying rules. This evaluation is a proxy for real enterprise settings, where decision logs would come from customer service records or internal ticketing systems. The gap between proxy and real-world data is a limitation we discuss further in \S\ref{sec:limitations}.
+
+\textbf{Incomplete coverage is a feature, not a failure.} Decision graphs cannot anticipate every possible condition combination. When a query falls outside defined paths, the system assigns a low compliance score and escalates to the policy owner rather than generating a potentially non-compliant response. Detecting that existing policy provides no guidance for a given situation is itself a valuable output: it surfaces policy gaps that the organization can then address. A system that silently generates responses for uncovered cases would mask these gaps.
+
+\textbf{Anticipated deployment challenges.} Based on our system design and related enterprise case studies \citep{bofa2025,wellsfargo2025}, we identify three challenges for production use: (1) metadata quality, as organizations with poor document management will see degraded governance; (2) policy ownership ambiguity, as cross-departmental policies often lack a clear single owner; and (3) integration with existing document management and change control systems, which is necessary for keeping \texttt{effective\_date} and \texttt{owner} fields current.
+
+
+% ============================================================
+% 7. LIMITATIONS
+% ============================================================
+\section*{Limitations}
+\label{sec:limitations}
+
+\textbf{Metadata dependency.} System effectiveness depends on metadata quality. Organizations with poor document management will see degraded governance.
+
+\textbf{Unstructured documents.} Extraction accuracy degrades on poorly structured documents. Preprocessing or human review may be required.
+
+\textbf{Conflict resolution.} Same-priority conflicts still require human judgment. Fully automated resolution remains future work.
+
+\textbf{English-only evaluation.} Our benchmark is English-only. Multilingual policy handling requires further research.
+
+\textbf{Implicit policy data.} Real enterprise decision logs are proprietary. We use DecisionsDev \citep{decisionsDev2024} as a proxy; validation on actual enterprise logs remains future work.
+
+% ============================================================
+% 8. CONCLUSION
+% ============================================================
+\section{Conclusion}
+
+We presented PolicyLLM, to our knowledge the first end-to-end framework for automating enterprise policy compliance. Policies are extracted into structured components (\texttt{scope}, \texttt{conditions}, \texttt{actions}, \texttt{exceptions}) with governance metadata (\texttt{source}, \texttt{owner}, \texttt{effective\_date}, \texttt{domain}, \texttt{regulatory\_linkage}), formalized into verifiable representations (logic rules, constraint specifications) for SMT-based conflict detection and procedural representations (decision graphs) for structured runtime guidance, then verified using hybrid SMT+semantic analysis with five-level priority resolution.
+
+Our central finding is that extraction without metadata enables detection but not governance. Structured components support runtime enforcement, while metadata enables audit trails, escalation, expiration management, and priority resolution.
+
+We release PolicyCompliance-Enterprise and the extraction and conflict detection modules to support reproducibility.\footnote{URL withheld for anonymous review.}
+
+% ============================================================
+% ETHICS
+% ============================================================
+\section*{Ethics Statement}
+
+\textbf{Over-blocking risks.} Automated enforcement may incorrectly block legitimate requests. We report false positive rates and recommend human review channels.
+
+\textbf{Metadata privacy.} The \texttt{owner} field may contain employee information. Production deployments should implement role-based access controls.
+
+\textbf{Implicit policy risks.} Behavioral mining may surface biased or unauthorized practices. We require mandatory human validation before integration.
+
+\textbf{Audit transparency.} All enforcement decisions are logged with \texttt{source} traceability.
+
+% ============================================================
+% REFERENCES
+% ============================================================
+\bibliography{latex/custom}
+
+\end{document}

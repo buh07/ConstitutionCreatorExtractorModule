@@ -1,0 +1,31 @@
+# Example configuration for the extraction pipeline
+llm:
+  provider: ollama  # ollama (default) | bedrock_claude | chatgpt | anthropic
+  model_id: mistral:latest
+  region: us-east-2  # used for bedrock_claude
+  temperature: 0.1
+  max_tokens: 4096
+  top_k: 250
+  retries: 2
+  backoff: 1.5
+
+parallel:
+  enabled: false
+  num_workers: null
+
+regularization:
+  ocr_confidence_threshold: 0.8
+  max_pages: 500
+
+merge:
+  similarity_threshold: 0.9
+
+validation:
+  confidence_threshold: 0.7
+  flag_issue_rate: 0.2
+
+docai:
+  project_id: your-gcp-project-id
+  location: us  # e.g., us, eu
+  processor_id: your-processor-id
+  processor_version: null  # optional; null uses the default processor version

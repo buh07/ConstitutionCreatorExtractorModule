@@ -1,0 +1,141 @@
+[
+  {
+    "schema_version": "1.0",
+    "processing_status": {
+      "extraction": "complete",
+      "formalization": "pending",
+      "conflict_detection": "pending",
+      "layer_assignment": "pending"
+    },
+    "policy_id": "POL-REFUND-001",
+    "origin": "explicit",
+    "doc_id": "constitution_v2",
+    "scope": {
+      "customer_segments": ["all"],
+      "product_categories": ["all"],
+      "channels": ["online", "in-store"],
+      "regions": ["all"]
+    },
+    "conditions": [
+      {
+        "type": "time_window",
+        "value": 30,
+        "unit": "days",
+        "operator": "<=",
+        "target": "general",
+        "source_text": "Customers may return items within 30 days of purchase"
+      },
+      {
+        "type": "time_window",
+        "value": 15,
+        "unit": "days",
+        "operator": "<=",
+        "target": "electronics",
+        "source_text": "Electronics must be returned within 15 days"
+      },
+      {
+        "type": "boolean_flag",
+        "value": true,
+        "parameter": "has_receipt",
+        "source_text": "Receipt is required for a cash refund"
+      }
+    ],
+    "actions": [
+      {
+        "type": "required",
+        "action": "full_refund",
+        "requires": ["has_receipt", "within_window"],
+        "source_text": "Customers may return items within 30 days of purchase for a full refund"
+      },
+      {
+        "type": "fallback",
+        "action": "store_credit",
+        "requires": ["no_receipt"],
+        "source_text": "Items without receipt receive store credit only"
+      }
+    ],
+    "exceptions": [
+      {
+        "description": "Electronics: 15-day override on 30-day window",
+        "source_text": "Electronics must be returned within 15 days"
+      }
+    ],
+    "entities": [
+      {"type": "date", "value": "30 days", "span": {"start": 128, "end": 135, "page": 2, "section_id": "sec2.3"}},
+      {"type": "date", "value": "15 days", "span": {"start": 182, "end": 188, "page": 3, "section_id": "sec4.1"}}
+    ],
+    "metadata": {
+      "source": "constitution_v2#sec4.1",
+      "owner": "Customer Service Dept",
+      "effective_date": "2024-01-15",
+      "domain": "refund",
+      "regulatory_linkage": ["FTC Cooling-Off Rule"]
+    },
+    "provenance": {
+      "passes_used": [1, 2, 3, 4, 5, 6],
+      "low_confidence": [],
+      "confidence_score": 0.9,
+      "source_spans": [
+        {"start": 0, "end": 260, "page": 2, "section_id": "sec2.3"},
+        {"start": 261, "end": 520, "page": 3, "section_id": "sec4.1"}
+      ]
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "processing_status": {
+      "extraction": "complete",
+      "formalization": "pending",
+      "conflict_detection": "pending",
+      "layer_assignment": "pending"
+    },
+    "policy_id": "POL-PRIVACY-002",
+    "origin": "explicit",
+    "doc_id": "constitution_v2",
+    "scope": {
+      "customer_segments": ["all"],
+      "product_categories": ["all"],
+      "channels": ["chatbot"],
+      "regions": ["all"]
+    },
+    "conditions": [
+      {
+        "type": "boolean_flag",
+        "value": true,
+        "parameter": "contains_pii",
+        "source_text": "Chatbots must never disclose PII"
+      }
+    ],
+    "actions": [
+      {
+        "type": "prohibited",
+        "action": "disclose_pii",
+        "requires": ["contains_pii"],
+        "source_text": "Chatbots must never disclose PII"
+      },
+      {
+        "type": "required",
+        "action": "escalate_to_owner",
+        "requires": ["uncertain_pii"],
+        "source_text": "If uncertain, escalate to Privacy Team"
+      }
+    ],
+    "exceptions": [],
+    "entities": [],
+    "metadata": {
+      "source": "constitution_v2#sec5.2",
+      "owner": "Privacy Team",
+      "effective_date": "2024-01-01",
+      "domain": "privacy",
+      "regulatory_linkage": ["GDPR"]
+    },
+    "provenance": {
+      "passes_used": [1, 2, 3, 4, 5, 6],
+      "low_confidence": ["owner_inference"],
+      "confidence_score": 0.86,
+      "source_spans": [
+        {"start": 0, "end": 200, "page": 5, "section_id": "sec5.2"}
+      ]
+    }
+  }
+]

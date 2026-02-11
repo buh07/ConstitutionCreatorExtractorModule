@@ -11,6 +11,7 @@ def main() -> None:
     parser.add_argument("--tenant", dest="tenant_id", default="tenant_default", help="Tenant identifier")
     parser.add_argument("--batch", dest="batch_id", default="batch_default", help="Batch identifier")
     parser.add_argument("--config", dest="config_path", default="configs/config.example.yaml", help="Path to YAML config")
+    parser.add_argument("--stage5-input", dest="stage5_input", default=None, help="Path to Stage 5 runtime JSON(s) to ingest")
     args = parser.parse_args()
 
     config = load_config(args.config_path)
@@ -22,6 +23,7 @@ def main() -> None:
         tenant_id=args.tenant_id,
         batch_id=args.batch_id,
         config=config,
+        stage5_input=args.stage5_input,
     )
 
 

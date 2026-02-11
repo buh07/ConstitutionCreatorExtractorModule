@@ -1,6 +1,8 @@
 """Pipeline orchestrator for regularization and multi-pass extraction."""
+import json
 import logging
 import os
+import shutil
 import time
 from collections import defaultdict
 from typing import Any, Dict, List
@@ -70,15 +72,59 @@ def _init_policy(doc_id: str, section: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _normalize_scope(scope: Dict[str, List[str]]) -> Dict[str, List[str]]:
-    """Ensure scope keys exist; default to ['all'] only if entirely empty."""
+_SCOPE_KEYS = ["customer_segments", "product_categories", "channels", "regions"]
+
+
+def _regex_scope(section: Dict[str, Any], enable_regex: bool) -> Dict[str, List[str]]:
+    """Heuristic scope extraction from section text."""
+    if not enable_regex:
+        return {k: [] for k in _SCOPE_KEYS}
+    text_parts = []
+    for para in section.get("paragraphs", []):
+        if isinstance(para, dict):
+            text_parts.append(para.get("text", ""))
+        else:
+            text_parts.append(str(para))
+    text = "\n".join(text_parts).lower()
+    product_categories = []
+    channels = []
+    if "electronic" in text:
+        product_categories.append("electronics")
+    if "chatbot" in text or "bot" in text:
+        channels.append("chatbot")
+    return {
+        "customer_segments": [],
+        "product_categories": list(dict.fromkeys(product_categories)),
+        "channels": list(dict.fromkeys(channels)),
+        "regions": [],
+    }
+
+
+def _normalize_scope(scope: Dict[str, List[str]], section: Dict[str, Any], scope_cfg: Dict[str, Any]) -> Dict[str, List[str]]:
+    """Ensure scope keys exist; default based on configured fallback; add regex cues if enabled."""
+    fallback = (scope_cfg.get("fallback") or "all").lower() if scope_cfg else "all"
+    enable_regex = scope_cfg.get("enable_regex", True) if scope_cfg else True
     scope = scope or {}
-    keys = ["customer_segments", "product_categories", "channels", "regions"]
-    empty = all(not scope.get(k) for k in keys)
+    # merge regex hints
+    regex_scope = _regex_scope(section, enable_regex)
+    for key in _SCOPE_KEYS:
+        vals = scope.get(key) or []
+        regex_vals = regex_scope.get(key) or []
+        merged = list(dict.fromkeys([*vals, *regex_vals]))
+        scope[key] = merged
+    empty = all(not scope.get(k) for k in _SCOPE_KEYS)
     if empty:
-        return {k: ["all"] for k in keys}
-    for key in keys:
-        scope.setdefault(key, [])
+        if fallback == "unknown":
+            scope = {k: ["unknown"] for k in _SCOPE_KEYS}
+        elif fallback == "none":
+            scope = {k: [] for k in _SCOPE_KEYS}
+        else:
+            scope = {k: ["all"] for k in _SCOPE_KEYS}
+    else:
+        for key in _SCOPE_KEYS:
+            scope.setdefault(key, [])
+            if not scope[key] and fallback in {"all", "unknown"}:
+                scope[key] = [fallback]
     return scope
 
 
@@ -119,6 +165,34 @@ def _normalize_requires(policy: Dict[str, Any]) -> Dict[str, Any]:
     return policy
 
 
+def _merge_components(primary: Dict[str, Any], secondary: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge two component outputs conservatively."""
+    merged = {}
+    # scope: prefer one with more specified entries
+    prim_scope = primary.get("scope", {})
+    sec_scope = secondary.get("scope", {})
+    def _score_scope(sc: Dict[str, List[str]]) -> int:
+        return sum(len(v) for v in sc.values() if v)
+    merged["scope"] = prim_scope if _score_scope(prim_scope) >= _score_scope(sec_scope) else sec_scope
+    # lists: union
+    merged["conditions"] = _merge_lists_unique(primary.get("conditions", []), secondary.get("conditions", []))
+    merged["actions"] = _merge_lists_unique(primary.get("actions", []), secondary.get("actions", []))
+    merged["exceptions"] = _merge_lists_unique(primary.get("exceptions", []), secondary.get("exceptions", []))
+    return merged
+
+
+def _consensus_metadata(primary: Dict[str, Any], secondary: Dict[str, Any]) -> Dict[str, Any]:
+    """Prefer non-empty metadata fields, falling back to secondary."""
+    md = primary.get("metadata", {}).copy()
+    sec = secondary.get("metadata", {})
+    for key in ["owner", "effective_date", "domain", "regulatory_linkage"]:
+        if key == "regulatory_linkage":
+            md[key] = md.get(key) or sec.get(key) or []
+        else:
+            md[key] = md.get(key) or sec.get(key)
+    return {"metadata": md}
+
+
 def _dynamic_max_tokens(section: Dict[str, Any], default_max: int) -> int:
     """
     Estimate a tighter max_tokens per section based on length.
@@ -130,7 +204,62 @@ def _dynamic_max_tokens(section: Dict[str, Any], default_max: int) -> int:
     return min(default_max, 512, max(64, approx_tokens))
 
 
-def run_pipeline(input_path: str, output_dir: str, tenant_id: str, batch_id: str, config: Config) -> None:
+def _ingest_stage5(stage5_input: str, output_dir: str, doc_id: str, batch_id: str) -> None:
+    """Copy provided Stage 5 runtime JSONs into a dedicated folder under out/."""
+    stage5_dir = os.path.join(output_dir, "stage5")
+    os.makedirs(stage5_dir, exist_ok=True)
+    paths: List[str] = []
+    if os.path.isfile(stage5_input):
+        paths = [stage5_input]
+    elif os.path.isdir(stage5_input):
+        for fname in os.listdir(stage5_input):
+            if fname.endswith(".json") or fname.endswith(".jsonl"):
+                paths.append(os.path.join(stage5_input, fname))
+    for src in paths:
+        dest_name = f"{doc_id}-{batch_id}-{os.path.basename(src)}"
+        shutil.copy(src, os.path.join(stage5_dir, dest_name))
+
+
+def _generate_stage5(policies: List[Dict[str, Any]], output_dir: str, doc_id: str, batch_id: str) -> None:
+    """
+    Create basic Stage 5 runtime JSON stubs (pre/during/post-generation) per policy.
+    Stored under out/stage5/.
+    """
+    stage5_dir = os.path.join(output_dir, "stage5")
+    os.makedirs(stage5_dir, exist_ok=True)
+    path = os.path.join(stage5_dir, f"{doc_id}-{batch_id}-stage5.jsonl")
+    with open(path, "w", encoding="utf-8") as f:
+        for pol in policies:
+            pid = pol.get("policy_id")
+            actions = pol.get("actions", [])
+            logic_rules = []
+            for act in actions:
+                natural = act.get("source_text") or act.get("action")
+                if not natural:
+                    continue
+                logic_rules.append({"policy_id": pid, "natural_language": natural})
+            stage5_obj = {
+                "policy_id": pid,
+                "pre_generation": {
+                    "retrieved_policies": [
+                        {"policy_id": pid, "relevance_score": 1.0, "priority_level": None}
+                    ]
+                },
+                "during_generation": {
+                    "injected_logic_rules": logic_rules,
+                    "priority_guidance": {"highest_active": {"policy_id": pid, "priority_level": None}},
+                },
+                "post_generation": {
+                    "checks": [],
+                    "compliance_score": {"weights": {}, "per_check": {}, "final": None},
+                    "action": "pass",
+                },
+            }
+            f.write(json.dumps(stage5_obj, ensure_ascii=False))
+            f.write("\n")
+
+
+def run_pipeline(input_path: str, output_dir: str, tenant_id: str, batch_id: str, config: Config, stage5_input: str | None = None) -> None:
     """
     End-to-end execution. Regularize documents, run passes, and write
     JSON outputs (policies.jsonl + index.json).
@@ -167,14 +296,33 @@ def run_pipeline(input_path: str, output_dir: str, tenant_id: str, batch_id: str
             retries=cfg_dict["llm"]["retries"],
             backoff=cfg_dict["llm"]["backoff"],
         )
-        cls = pass1_classify.run(sec_dict, local_llm)
+        double_enabled = cfg_dict.get("double_run", {}).get("enabled", False)
+
+        def _classify_once():
+            return pass1_classify.run(sec_dict, local_llm)
+
+        cls = _classify_once()
+        if double_enabled:
+            cls2 = _classify_once()
+            # prefer higher confidence; if tie and any is_policy true, choose that
+            if cls2.get("confidence", 0) > cls.get("confidence", 0):
+                cls = cls2
+            elif cls2.get("confidence", 0) == cls.get("confidence", 0) and cls2.get("is_policy") and not cls.get("is_policy"):
+                cls = cls2
         if not cls.get("is_policy"):
             return None
         policy = _init_policy(doc_id, sec_dict)
         policy["processing_status"]["extraction"] = "in_progress"
         policy["provenance"]["passes_used"].append(1)
-        comps = pass2_components.run(sec_dict, local_llm)
-        policy["scope"] = _normalize_scope(comps.get("scope", {}))
+        def _components_once():
+            return pass2_components.run(sec_dict, local_llm)
+
+        comps = _components_once()
+        if double_enabled:
+            comps2 = _components_once()
+            comps = _merge_components(comps, comps2)
+            policy["provenance"].setdefault("low_confidence", []).append("double_run_components")
+        policy["scope"] = _normalize_scope(comps.get("scope", {}), sec_dict, cfg_dict.get("scope", {}))
         policy["conditions"] = comps.get("conditions", [])
         policy["actions"] = comps.get("actions", [])
         policy["exceptions"] = comps.get("exceptions", [])
@@ -195,7 +343,9 @@ def run_pipeline(input_path: str, output_dir: str, tenant_id: str, batch_id: str
                 "top_k": config.llm.top_k,
                 "retries": config.llm.retries,
                 "backoff": config.llm.backoff,
-            }
+            },
+            "double_run": {"enabled": config.double_run.enabled},
+            "scope": {"fallback": config.scope.fallback, "enable_regex": config.scope.enable_regex},
         }
 
         @ray.remote
@@ -208,7 +358,15 @@ def run_pipeline(input_path: str, output_dir: str, tenant_id: str, batch_id: str
         policies = [p for p in results if p]
     else:
         for sec_dict in sections:
-            policy = _process_section(sec_dict, canonical.doc_id, {"llm": config.llm.__dict__})
+            policy = _process_section(
+                sec_dict,
+                canonical.doc_id,
+                {
+                    "llm": config.llm.__dict__,
+                    "double_run": {"enabled": config.double_run.enabled},
+                    "scope": {"fallback": config.scope.fallback, "enable_regex": config.scope.enable_regex},
+                },
+            )
             if policy:
                 policies.append(policy)
 
@@ -220,7 +378,16 @@ def run_pipeline(input_path: str, output_dir: str, tenant_id: str, batch_id: str
 
     # Pass 5: metadata
     for i, pol in enumerate(policies):
-        policies[i] = pass5_metadata.run(pol, canonical.model_dump() if hasattr(canonical, "model_dump") else {}, llm)
+        resolver_cfg = config.metadata_resolver.__dict__ if config.metadata_resolver else {}
+        if config.double_run.enabled:
+            m1 = pass5_metadata.run(pol, canonical.model_dump() if hasattr(canonical, "model_dump") else {}, llm, resolver_cfg)
+            m2 = pass5_metadata.run(pol, canonical.model_dump() if hasattr(canonical, "model_dump") else {}, llm, resolver_cfg)
+            merged_md = _consensus_metadata(m1, m2)
+            m1.update(merged_md)
+            policies[i] = m1
+            policies[i]["provenance"].setdefault("low_confidence", []).append("double_run_metadata")
+        else:
+            policies[i] = pass5_metadata.run(pol, canonical.model_dump() if hasattr(canonical, "model_dump") else {}, llm, resolver_cfg)
         policies[i]["provenance"]["passes_used"].append(5)
 
     # Normalize requires based on conditions
@@ -258,6 +425,13 @@ def run_pipeline(input_path: str, output_dir: str, tenant_id: str, batch_id: str
     }
     index_path = os.path.join(output_dir, f"{canonical.doc_id}-{batch_id}-index.json")
     write_index(index, index_path)
+
+    # Stage 5: generate stubs if enabled, ingest if provided
+    if config.stage5.generate:
+        _generate_stage5(policies, output_dir, canonical.doc_id, batch_id)
+    if stage5_input and config.stage5.ingest:
+        _ingest_stage5(stage5_input, output_dir, canonical.doc_id, batch_id)
+
     logger.info(
         "Pipeline completed: %d policies, flagged_pct=%.2f, domains=%s",
         len(policies),

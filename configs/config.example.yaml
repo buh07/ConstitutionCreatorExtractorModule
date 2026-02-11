@@ -24,6 +24,24 @@ validation:
   confidence_threshold: 0.7
   flag_issue_rate: 0.2
 
+stage5:
+  generate: true
+  ingest: true
+
+metadata_resolver:
+  use_regex: true
+  tenant_owner_default: null
+  tenant_effective_date_default: null
+  tenant_regulatory_linkage_default: []
+  domain_defaults: {}
+
+scope:
+  fallback: all  # all | unknown | none
+  enable_regex: true
+
+double_run:
+  enabled: false
+
 docai:
   project_id: your-gcp-project-id
   location: us  # e.g., us, eu

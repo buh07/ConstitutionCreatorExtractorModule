@@ -65,6 +65,10 @@ Edit `configs/config.example.yaml` (copy to `configs/config.yaml` if desired):
 - `regularization`: `ocr_confidence_threshold`, `max_pages`
 - `merge`: `similarity_threshold`
 - `validation`: `confidence_threshold`, `flag_issue_rate`
+- `scope`: `fallback` (all|unknown|none), `enable_regex`
+- `metadata_resolver`: regex toggle, tenant/domain defaults
+- `double_run`: enabled/disabled for consensus
+- `stage5`: `generate` (default true) and `ingest` to handle runtime JSONs
 - `docai`: GCP OCR settings (see above)
 
 ## 7) Project Layout (relevant files)

@@ -20,7 +20,15 @@ except Exception:
 
 # Avoid importing real LLM clients by stubbing pipeline.LLMClient
 import src.pipeline as pipeline
-from src.config import Config, LLMConfig, MergeConfig, ParallelConfig, RegularizationConfig, ValidationConfig
+from src.config import (
+    Config,
+    LLMConfig,
+    MergeConfig,
+    MetadataResolverConfig,
+    ParallelConfig,
+    RegularizationConfig,
+    ValidationConfig,
+)
 
 
 class StubLLM:
@@ -91,6 +99,7 @@ def stub_config() -> Config:
         validation=ValidationConfig(),
         docai=None,
         parallel=ParallelConfig(enabled=False, num_workers=None),
+        metadata_resolver=MetadataResolverConfig(),
     )
 
 

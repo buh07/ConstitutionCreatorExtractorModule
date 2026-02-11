@@ -1,3 +1,15 @@
 Return Policy
 
 Customers may return items within 30 days of purchase for a full refund with receipt. Electronics must be returned within 15 days. Items without a receipt receive store credit only.
+
+Owner: Customer Service Department
+Effective Date: January 15, 2024
+Regulatory Linkage: FTC Cooling-Off Rule
+
+Privacy Policy
+
+Chatbots must never disclose personally identifiable information (PII) unless the user provides explicit written consent. If the chatbot is uncertain whether content contains PII, it must escalate to the Privacy Team before responding. Unauthorized disclosure is prohibited and may result in account suspension.
+
+Owner: Privacy Team
+Effective Date: February 1, 2024
+Regulatory Linkage: GDPR

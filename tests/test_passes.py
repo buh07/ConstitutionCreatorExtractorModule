@@ -10,7 +10,7 @@ class StubLLM:
     def __init__(self, responses):
         self.responses = responses
 
-    def invoke_json(self, prompt):
+    def invoke_json(self, prompt, schema=None):
         # return the first matching response based on a key substring
         for key, value in self.responses.items():
             if key in prompt:

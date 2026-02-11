@@ -50,13 +50,17 @@ def run(policy: Dict[str, Any], doc_context: Dict[str, Any], llm_client: Any) ->
         regulatory_linkage: List[str]
     inferred = llm_client.invoke_json(prompt, schema=MetadataOut)
 
+    allowed_domains = {"refund", "privacy", "escalation", "security", "hr", "other"}
     md = policy.get("metadata", {})
     # set source if missing
     if not md.get("source") and section_id:
         md["source"] = f"{policy.get('doc_id')}#{section_id}"
     md["owner"] = inferred.get("owner", md.get("owner"))
     md["effective_date"] = inferred.get("effective_date", md.get("effective_date"))
-    md["domain"] = inferred.get("domain", md.get("domain"))
+    domain_val = (inferred.get("domain") or md.get("domain") or "other").lower()
+    if domain_val not in allowed_domains:
+        domain_val = "other"
+    md["domain"] = domain_val
     md["regulatory_linkage"] = inferred.get("regulatory_linkage", md.get("regulatory_linkage", []))
     policy["metadata"] = md
 
@@ -65,6 +69,8 @@ def run(policy: Dict[str, Any], doc_context: Dict[str, Any], llm_client: Any) ->
     low_conf = prov.get("low_confidence", [])
     if not md.get("owner") or md.get("owner") == "unknown":
         low_conf.append("owner_inference")
+    if not md.get("effective_date"):
+        low_conf.append("effective_date_missing")
     prov["low_confidence"] = list(dict.fromkeys(low_conf))
     policy["provenance"] = prov
     return policy

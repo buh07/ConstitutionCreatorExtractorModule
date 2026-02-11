@@ -2,6 +2,8 @@
 import json
 from typing import Any, Dict, List
 
+from pydantic import BaseModel
+
 
 VALIDATION_PROMPT = """You are a policy validation assistant. Given a policy JSON, check:
 - Are scope/conditions/actions/exceptions non-empty when appropriate?
@@ -44,13 +46,14 @@ def run(policy: Dict[str, Any], llm_client: Any) -> Dict[str, Any]:
     llm_issues = llm_result.get("issues", [])
     if isinstance(llm_issues, list):
         issues.extend(llm_issues)
-    needs_review = llm_result.get("needs_review", False) or len(issues) > 0
+    needs_review = bool(llm_result.get("needs_review", False) or len(issues) > 0)
     confidence = llm_result.get("confidence")
 
     prov = policy.get("provenance", {})
     low_conf = prov.get("low_confidence", [])
     if needs_review:
         low_conf.append("validation_issues")
+    prov["validation_issues"] = issues
     prov["low_confidence"] = list(dict.fromkeys(low_conf))
     if confidence is not None:
         prov["confidence_score"] = confidence if prov.get("confidence_score") is None else min(
@@ -59,6 +62,6 @@ def run(policy: Dict[str, Any], llm_client: Any) -> Dict[str, Any]:
     policy["provenance"] = prov
 
     status = policy.get("processing_status", {})
-    status["extraction"] = "complete" if not needs_review else "failed"
+    status["extraction"] = "complete"
     policy["processing_status"] = status
     return policy

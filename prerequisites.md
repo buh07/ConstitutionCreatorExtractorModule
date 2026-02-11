@@ -2,6 +2,8 @@
 
 This project extracts policies into structured JSON using a multi-pass pipeline. Below are the required tools, dependencies, and configuration steps to get started.
 
+**Note:** The legacy `acl-extractor` folder is no longer used. Activate and install everything in the local `.venv` inside this repository.
+
 ## 1) System Requirements
 - macOS/Linux with Python 3.11+
 - Disk space: ~10 GB (for local models and dependencies)
@@ -9,9 +11,12 @@ This project extracts policies into structured JSON using a multi-pass pipeline.
 ## 2) Core Dependencies
 Install via `pip` (or `pipx`/`pipenv`/`poetry` equivalent):
 ```
-pip install pymupdf==1.23.8 python-docx==1.1.0 beautifulsoup4==4.12.3 markdown==3.6 \
-spacy==3.7.2 sentence-transformers==2.3.1 boto3==1.34.34 pydantic==2.6.1 \
-google-cloud-documentai==2.24.0
+python3 -m venv .venv
+source .venv/bin/activate
+pip install "numpy<2" "pymupdf>=1.24.10" python-docx==1.1.0 beautifulsoup4==4.12.3 markdown==3.6 \
+spacy==3.7.2 "torch>=2.2,<2.5" sentence-transformers==2.3.1 boto3==1.34.34 pydantic==2.6.1 \
+google-cloud-documentai==2.24.0 pyyaml pytest
+python -m spacy download en_core_web_sm
 ```
 
 Optional but recommended:

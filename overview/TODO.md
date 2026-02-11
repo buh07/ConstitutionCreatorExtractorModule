@@ -22,3 +22,7 @@
 - [x] Testing: add unit tests for passes (classification, components, entities span propagation, merge evidence). Integration tests pending when sample docs are ready.
 - [x] Sample data: populate `sample_docs/` with a small doc and expected golden outputs to exercise the pipeline.
 - [x] Parallelization (optional): Ray wrapper to parallelize per-section processing; off by default (config.parallel.enabled).
+- [ ] Double-run consensus mode: add config to run select passes twice (different seeds/models) in parallel, reconcile outputs (merge or choose higher-confidence) to reduce LLM variance.
+- [ ] Stage 5 JSONs: generate runtime pre/during/post-generation JSON objects (read-only consumption of extracted policies) per Output Format Definition.
+- [ ] Metadata resolver flexibility: add configurable strategy (regex/keyword hints → tenant/domain defaults → LLM) with per-tenant overrides.
+- [ ] Scope fallback modes: make scope defaulting configurable (all | unknown | none) and add light regex cues for products/channels/regions before defaulting.

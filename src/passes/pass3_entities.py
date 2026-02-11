@@ -1,12 +1,23 @@
-"""Pass 3: entity extraction (regex+spaCy baseline, optional LLM fallback)."""
+"""Pass 3: entity extraction (regex baseline, optional spaCy/LLM fallback)."""
+import os
 import re
 from typing import Any, Dict, List, Optional
 
-try:
-    import spacy
-    _NLP = spacy.load("en_core_web_sm")
-except Exception:
-    _NLP = None
+# Lazy spaCy loader to avoid heavy imports during testing
+_NLP = None
+
+
+def _get_spacy():
+    global _NLP
+    if _NLP is not None:
+        return _NLP
+    try:
+        import spacy  # type: ignore
+        _NLP = spacy.load("en_core_web_sm")
+    except Exception:
+        _NLP = None
+    return _NLP
+
 
 # Simple regexes for dates/amounts/percents
 DATE_PATTERN = re.compile(r"\b\d{4}-\d{2}-\d{2}\b|\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},\s+\d{4}\b", re.IGNORECASE)
@@ -16,12 +27,18 @@ PERCENT_PATTERN = re.compile(r"\d+(?:\.\d+)?%")
 DAYSPAN_PATTERN = re.compile(r"\b\d+\s+days\b", re.IGNORECASE)
 
 
-def _find_spans(pattern: re.Pattern, text: str, section_id: Optional[str], page: Optional[int]) -> List[Dict[str, Any]]:
+def _find_spans(
+    pattern: re.Pattern,
+    text: str,
+    section_id: Optional[str],
+    page: Optional[int],
+    ent_type: str,
+) -> List[Dict[str, Any]]:
     ents = []
     for m in pattern.finditer(text):
         ents.append(
             {
-                "type": "date" if pattern == DATE_PATTERN else ("amount" if pattern == AMOUNT_PATTERN else "percent"),
+                "type": ent_type,
                 "value": m.group(0),
                 "span": {"start": m.start(), "end": m.end(), "page": page, "section_id": section_id},
             }
@@ -30,9 +47,10 @@ def _find_spans(pattern: re.Pattern, text: str, section_id: Optional[str], page:
 
 
 def _spacy_entities(text: str, section_id: Optional[str], page: Optional[int]) -> List[Dict[str, Any]]:
-    if not _NLP:
+    nlp = _get_spacy()
+    if not nlp:
         return []
-    doc = _NLP(text)
+    doc = nlp(text)
     mapped = []
     for ent in doc.ents:
         etype = ent.label_.lower()
@@ -61,7 +79,8 @@ def _llm_fallback(text: str, llm_client: Any) -> List[Dict[str, Any]]:
 Text:
 """
     try:
-        return llm_client.invoke_json(prompt + text)
+        res = llm_client.invoke_json(prompt + text)
+        return res if isinstance(res, list) else []
     except Exception:
         return []
 
@@ -80,11 +99,13 @@ def run(section: Dict[str, Any], components: Dict[str, Any], llm_client: Any) ->
     page = page or section.get("page")
 
     entities: List[Dict[str, Any]] = []
-    entities.extend(_find_spans(DATE_PATTERN, text, section_id, page))
-    entities.extend(_find_spans(DAYSPAN_PATTERN, text, section_id, page))
-    entities.extend(_find_spans(AMOUNT_PATTERN, text, section_id, page))
-    entities.extend(_find_spans(PERCENT_PATTERN, text, section_id, page))
-    entities.extend(_spacy_entities(text, section_id, page))
+    entities.extend(_find_spans(DATE_PATTERN, text, section_id, page, "date"))
+    entities.extend(_find_spans(DAYSPAN_PATTERN, text, section_id, page, "date"))
+    entities.extend(_find_spans(AMOUNT_PATTERN, text, section_id, page, "amount"))
+    entities.extend(_find_spans(PERCENT_PATTERN, text, section_id, page, "percent"))
+    # spaCy entities optional (set ENABLE_SPACY_ENTS=1 to enable); otherwise skip heavy deps
+    if os.getenv("ENABLE_SPACY_ENTS", "0") == "1":
+        entities.extend(_spacy_entities(text, section_id, page))
 
     # Optional LLM fallback for ambiguous cases
     if llm_client:

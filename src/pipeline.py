@@ -2,6 +2,7 @@
 import logging
 import os
 import time
+from collections import defaultdict
 from typing import Any, Dict, List
 
 try:
@@ -64,8 +65,69 @@ def _init_policy(doc_id: str, section: Dict[str, Any]) -> Dict[str, Any]:
             "confidence_score": None,
             "source_spans": [_source_span(section)],
             "evidence_count": 1,
+            "validation_issues": [],
         },
     }
+
+
+def _normalize_scope(scope: Dict[str, List[str]]) -> Dict[str, List[str]]:
+    """Ensure scope keys exist; default to ['all'] only if entirely empty."""
+    scope = scope or {}
+    keys = ["customer_segments", "product_categories", "channels", "regions"]
+    empty = all(not scope.get(k) for k in keys)
+    if empty:
+        return {k: ["all"] for k in keys}
+    for key in keys:
+        scope.setdefault(key, [])
+    return scope
+
+
+def _assign_policy_ids(policies: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Assign policy IDs per domain using POL-{DOMAIN}-{###} convention."""
+    counters: Dict[str, int] = defaultdict(int)
+    for pol in policies:
+        domain = (pol.get("metadata", {}).get("domain") or "other").upper()
+        counters[domain] += 1
+        seq = counters[domain]
+        pol["policy_id"] = f"POL-{domain}-{seq:03d}"
+    return policies
+
+
+def _normalize_requires(policy: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normalize action.requires entries to align with condition parameters/targets.
+    - Map 'no_receipt' → 'has_receipt_false' if a has_receipt condition exists.
+    - Map 'within_window' → derived from time_window conditions (e.g., within_time_window).
+    Leaves unknown tokens untouched.
+    """
+    conds = policy.get("conditions", []) or []
+    actions = policy.get("actions", []) or []
+    # derive known flags
+    has_receipt_flag = any(c.get("parameter") == "has_receipt" for c in conds)
+    has_time_window = any(c.get("type") == "time_window" for c in conds)
+    for act in actions:
+        requires = []
+        for req in act.get("requires", []):
+            if req == "no_receipt" and has_receipt_flag:
+                requires.append("has_receipt_false")
+            elif req == "within_window" and has_time_window:
+                requires.append("within_time_window")
+            else:
+                requires.append(req)
+        act["requires"] = requires
+    policy["actions"] = actions
+    return policy
+
+
+def _dynamic_max_tokens(section: Dict[str, Any], default_max: int) -> int:
+    """
+    Estimate a tighter max_tokens per section based on length.
+    Approx tokens ~= len(text)/4; clamp to [64, 512] and never exceed configured max.
+    """
+    paras = [p.get("text", "") if isinstance(p, dict) else str(p) for p in section.get("paragraphs", [])]
+    text = "\n\n".join(paras)
+    approx_tokens = max(1, len(text) // 4)
+    return min(default_max, 512, max(64, approx_tokens))
 
 
 def run_pipeline(input_path: str, output_dir: str, tenant_id: str, batch_id: str, config: Config) -> None:
@@ -94,11 +156,12 @@ def run_pipeline(input_path: str, output_dir: str, tenant_id: str, batch_id: str
     sections = [_section_dict(sec) for sec in canonical.sections]
 
     def _process_section(sec_dict: Dict[str, Any], doc_id: str, cfg_dict: Dict[str, Any]) -> Dict[str, Any] | None:
+        max_tokens = _dynamic_max_tokens(sec_dict, cfg_dict["llm"]["max_tokens"])
         local_llm = LLMClient(
             provider=cfg_dict["llm"]["provider"],
             model_id=cfg_dict["llm"]["model_id"],
             temperature=cfg_dict["llm"]["temperature"],
-            max_tokens=cfg_dict["llm"]["max_tokens"],
+            max_tokens=max_tokens,
             region=cfg_dict["llm"]["region"],
             top_k=cfg_dict["llm"]["top_k"],
             retries=cfg_dict["llm"]["retries"],
@@ -111,7 +174,7 @@ def run_pipeline(input_path: str, output_dir: str, tenant_id: str, batch_id: str
         policy["processing_status"]["extraction"] = "in_progress"
         policy["provenance"]["passes_used"].append(1)
         comps = pass2_components.run(sec_dict, local_llm)
-        policy["scope"] = comps.get("scope", {})
+        policy["scope"] = _normalize_scope(comps.get("scope", {}))
         policy["conditions"] = comps.get("conditions", [])
         policy["actions"] = comps.get("actions", [])
         policy["exceptions"] = comps.get("exceptions", [])
@@ -159,6 +222,12 @@ def run_pipeline(input_path: str, output_dir: str, tenant_id: str, batch_id: str
     for i, pol in enumerate(policies):
         policies[i] = pass5_metadata.run(pol, canonical.model_dump() if hasattr(canonical, "model_dump") else {}, llm)
         policies[i]["provenance"]["passes_used"].append(5)
+
+    # Normalize requires based on conditions
+    policies = [_normalize_requires(pol) for pol in policies]
+
+    # Assign policy IDs after domains are inferred
+    policies = _assign_policy_ids(policies)
 
     # Pass 6: validation
     for i, pol in enumerate(policies):

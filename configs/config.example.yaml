@@ -1,12 +1,12 @@
 # Example configuration for the extraction pipeline
 llm:
-  provider: ollama  # ollama (default) | bedrock_claude | chatgpt | anthropic
+  provider: ollama  # ollama (local default) | stub (offline) | bedrock_claude | chatgpt | anthropic
   model_id: mistral:latest
   region: us-east-2  # used for bedrock_claude
   temperature: 0.1
-  max_tokens: 4096
+  max_tokens: 256
   top_k: 250
-  retries: 2
+  retries: 0
   backoff: 1.5
 
 parallel:

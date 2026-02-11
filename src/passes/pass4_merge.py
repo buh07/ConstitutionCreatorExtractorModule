@@ -1,14 +1,24 @@
 """Pass 4: merge/deduplicate policies across sections with evidence aggregation."""
+import os
 from typing import Any, Dict, List, Tuple
 
-try:
-    from sentence_transformers import SentenceTransformer
-    import numpy as np
+_EMB_MODEL = None
+np = None
 
-    _EMB_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
-except Exception:
-    _EMB_MODEL = None
-    np = None
+
+def _load_emb_model():
+    global _EMB_MODEL, np
+    if _EMB_MODEL is not None:
+        return _EMB_MODEL
+    try:
+        from sentence_transformers import SentenceTransformer  # type: ignore
+        import numpy as np  # type: ignore
+
+        _EMB_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+        globals()["np"] = np
+    except Exception:
+        _EMB_MODEL = None
+    return _EMB_MODEL
 
 
 def _canon_scope(scope: Dict[str, List[str]]) -> Tuple:
@@ -125,8 +135,10 @@ def run(policies: List[Dict[str, Any]], llm_client: Any, sim_threshold: float = 
 
     merged = list(buckets.values())
 
-    # Optional semantic merge if embedding model available
-    if not _EMB_MODEL or not np:
+    # Semantic merge optional; set ENABLE_EMBED_MERGE=1 to enable
+    if os.getenv("ENABLE_EMBED_MERGE", "0") != "1":
+        return merged
+    if not _load_emb_model() or not np:
         return merged
 
     texts = [_text_signature(p) for p in merged]

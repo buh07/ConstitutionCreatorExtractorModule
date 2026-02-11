@@ -5,13 +5,13 @@ from pydantic import BaseModel, Field
 
 COMPONENT_PROMPT = """You are a policy extraction assistant. Given a section with heading and text, extract structured fields per the schema. Respond in JSON only with keys: scope, conditions, actions, exceptions.
 Schema:
-- scope: { customer_segments:[], product_categories:[], channels:[], regions:[] } (use lowercase; "all" when unspecified)
+- scope: { customer_segments:[], product_categories:[], channels:[], regions:[] } (use lowercase; if unspecified, use ["unknown"] rather than hallucinating)
 - conditions: list of { type, value, unit, operator, target, parameter, source_text }
 - actions: list of { type, action, requires:[], source_text }
 - exceptions: list of { description, source_text }
 Condition types: time_window | amount_threshold | customer_tier | product_category | geographic | boolean_flag | role_requirement | other
 Action types: required | prohibited | fallback | conditional | discovered_pattern | other
-If insufficient policy content, return empty lists/objects. Do not hallucinate beyond the provided text."""
+If insufficient policy content, return empty lists/objects. Do not hallucinate beyond the provided text. Be conservative: prefer \"unknown\" or empty arrays to invented details."""
 
 
 class ScopeModel(BaseModel):

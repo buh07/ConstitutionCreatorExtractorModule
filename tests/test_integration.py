@@ -26,9 +26,9 @@ from src.config import Config, LLMConfig, MergeConfig, ParallelConfig, Regulariz
 class StubLLM:
     """Stub LLM client returning deterministic JSON for prompts."""
 
-    def invoke_json(self, prompt: str) -> Dict[str, Any]:
+    def invoke_json(self, prompt: str, schema=None) -> Dict[str, Any]:
         lower = prompt.lower()
-        if "classify section" in lower:
+        if "classify section" in lower or "policy extraction assistant" in lower:
             return {"is_policy": True, "confidence": 0.95, "reason": "stubbed policy"}
         if "extract structured fields" in lower or "schema" in lower:
             return {
@@ -59,8 +59,18 @@ class StubLLM:
             }
         if "validation assistant" in lower:
             return {"issues": [], "needs_review": False, "confidence": 0.9}
-        # default empty
-        return {}
+        # default: return components with broad scope
+        return {
+            "scope": {
+                "customer_segments": ["all"],
+                "product_categories": ["all"],
+                "channels": ["all"],
+                "regions": ["all"],
+            },
+            "conditions": [],
+            "actions": [],
+            "exceptions": [],
+        }
 
 
 @pytest.fixture

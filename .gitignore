@@ -19,3 +19,16 @@ out/
 *.tar.gz
 sample_docs/expected_policies.jsonl
 sample_docs/expected_index.json
+
+# Paper files (not tracked)
+acl_latex.tex
+custom.bib
+figures.tex
+paper.tex
+section.tex
+reviews.txt
+revisions.md
+extra_benchmarks.md
+CHANGES_OVERVIEW.md
+Policy.zip
+PolicyLLM/
